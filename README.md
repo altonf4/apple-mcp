@@ -134,3 +134,79 @@ bun run index.ts
 ```
 
 enjoy!
+
+# Apple MCP Server
+
+A secure and n8n-compatible Model Context Protocol (MCP) server for Apple services integration.
+
+## Features
+
+- Secure HTTP server with CORS support
+- Bearer token authentication
+- Rate limiting and request validation
+- n8n integration support
+- Apple services integration (Contacts, Notes, Messages, Mail, etc.)
+- Proper error handling and logging
+
+## Installation
+
+```bash
+# Install dependencies
+bun install
+```
+
+## Configuration
+
+Create a `.env` file in the root directory with the following variables:
+
+```env
+# Server Configuration
+PORT=3000
+NODE_ENV=development
+
+# Security
+ALLOWED_ORIGINS=http://localhost:5678,http://localhost:3000
+RATE_LIMIT_WINDOW_MS=900000  # 15 minutes
+RATE_LIMIT_MAX_REQUESTS=100
+API_TOKEN=your-secure-token-here  # Required for authentication
+
+# Logging
+LOG_LEVEL=info
+```
+
+## Usage
+
+```bash
+# Development mode
+bun run dev
+
+# Production mode
+bun run start
+```
+
+## n8n Integration
+
+To use this server with n8n:
+
+1. Start the MCP server using `bun run start`
+2. In n8n, create a new HTTP Request node
+3. Configure the node with:
+   - Method: POST
+   - URL: http://localhost:3000/api/tools
+   - Headers: 
+     - Content-Type: application/json
+     - Authorization: Bearer your-secure-token-here
+   - Body: Your MCP tool request
+
+## Security Features
+
+- Bearer token authentication
+- CORS protection with configurable allowed origins
+- Rate limiting to prevent abuse
+- Secure headers
+- Request validation
+- Error handling and logging
+
+## License
+
+MIT

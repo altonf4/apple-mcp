@@ -7,6 +7,13 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { runAppleScript } from "run-applescript";
 import tools from "./tools";
+import { serve } from "@hono/node-server";
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { logger } from "hono/logger";
+import { secureHeaders } from "hono/secure-headers";
+import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
 
 interface WebSearchArgs {
   query: string;
@@ -96,10 +103,11 @@ loadingTimeout = setTimeout(() => {
   reminders = null;
   webSearch = null;
   calendar = null;
+  maps = null;
   
   // Proceed with server setup
   initServer();
-}, 5000); // 5 second timeout
+}, 5000) as unknown as NodeJS.Timeout; // 5 second timeout
 
 // Eager loading attempt
 async function attemptEagerLoading() {
@@ -174,10 +182,115 @@ attemptEagerLoading();
 // Main server object
 let server: Server;
 
+// Authentication middleware
+const auth = () => {
+  return async (c: any, next: () => Promise<void>) => {
+    const authHeader = c.req.header('Authorization');
+    
+    if (!authHeader) {
+      return c.json({ error: 'Authorization header is required' }, 401);
+    }
+
+    const [type, token] = authHeader.split(' ');
+    
+    if (type !== 'Bearer') {
+      return c.json({ error: 'Only Bearer authentication is supported' }, 401);
+    }
+
+    if (!token) {
+      return c.json({ error: 'Token is required' }, 401);
+    }
+
+    // Validate token against environment variable
+    const validToken = process.env.API_TOKEN;
+    if (!validToken) {
+      console.error('API_TOKEN environment variable is not set');
+      return c.json({ error: 'Server configuration error' }, 500);
+    }
+
+    if (token !== validToken) {
+      return c.json({ error: 'Invalid token' }, 401);
+    }
+
+    await next();
+  };
+};
+
+// Rate limiting implementation
+const rateLimit = (options: { windowMs: number; max: number }) => {
+  const requests = new Map<string, { count: number; resetTime: number }>();
+  
+  return async (c: any, next: () => Promise<void>) => {
+    const ip = c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || 'unknown';
+    const now = Date.now();
+    
+    // Clean up expired entries
+    for (const [key, value] of requests.entries()) {
+      if (now > value.resetTime) {
+        requests.delete(key);
+      }
+    }
+    
+    // Get or create rate limit entry
+    let entry = requests.get(ip);
+    if (!entry) {
+      entry = {
+        count: 0,
+        resetTime: now + options.windowMs
+      };
+      requests.set(ip, entry);
+    }
+    
+    // Check if rate limit exceeded
+    if (entry.count >= options.max) {
+      return c.json({ error: 'Too many requests, please try again later' }, 429);
+    }
+    
+    // Increment counter
+    entry.count++;
+    
+    // Continue to next middleware
+    await next();
+  };
+};
+
 // Initialize the server and set up handlers
 function initServer() {
   console.error(`Initializing server in ${safeModeFallback ? 'safe' : 'standard'} mode...`);
   
+  const app = new Hono();
+  
+  // Add security middleware
+  app.use("*", logger());
+  app.use("*", secureHeaders());
+  app.use("*", cors({
+    origin: process.env.ALLOWED_ORIGINS?.split(",") || ["http://localhost:5678"], // Default n8n port
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowHeaders: ["Content-Type", "Authorization"],
+    exposeHeaders: ["Content-Length", "X-Request-Id"],
+    maxAge: 86400,
+    credentials: true,
+  }));
+  
+  // Add rate limiting
+  app.use("*", rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per windowMs
+  }));
+
+  // Add authentication
+  app.use("*", auth());
+
+  // Error handling middleware
+  app.onError((err, c) => {
+    console.error("Server error:", err);
+    if (err instanceof HTTPException) {
+      return c.json({ error: err.message }, err.status);
+    }
+    return c.json({ error: "Internal Server Error" }, 500);
+  });
+
+  // Initialize MCP server
   server = new Server(
     {
       name: "Apple MCP tools",
@@ -1052,34 +1165,14 @@ end tell`;
     }
   });
 
-  // Start the server transport
-  console.error("Setting up MCP server transport...");
-
-  (async () => {
-    try {
-      console.error("Initializing transport...");
-      const transport = new StdioServerTransport();
-
-      // Ensure stdout is only used for JSON messages
-      console.error("Setting up stdout filter...");
-      const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-      process.stdout.write = (chunk: any, encoding?: any, callback?: any) => {
-        // Only allow JSON messages to pass through
-        if (typeof chunk === "string" && !chunk.startsWith("{")) {
-          console.error("Filtering non-JSON stdout message");
-          return true; // Silently skip non-JSON messages
-        }
-        return originalStdoutWrite(chunk, encoding, callback);
-      };
-
-      console.error("Connecting transport to server...");
-      await server.connect(transport);
-      console.error("Server connected successfully!");
-    } catch (error) {
-      console.error("Failed to initialize MCP server:", error);
-      process.exit(1);
-    }
-  })();
+  // Start the server
+  const port = process.env.PORT || 3000;
+  serve({
+    fetch: app.fetch,
+    port: Number(port),
+  }, (info) => {
+    console.error(`Server is running on port ${info.port}`);
+  });
 }
 
 // Helper functions for argument type checking
